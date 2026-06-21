@@ -1,0 +1,16 @@
+# One-click-ish deploy to Render (https://render.com).
+# In Render: New + > Blueprint > point at this repo. It reads this file.
+# Then set the two secret env vars (API_SPORTS_KEY, APP_TOKEN) in the dashboard.
+services:
+  - type: web
+    name: footballhub-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: API_SPORTS_KEY
+        sync: false   # set in dashboard (your api-football key)
+      - key: APP_TOKEN
+        sync: false   # set in dashboard (your shared app token)
