@@ -188,6 +188,113 @@ USAGE = Usage()
 
 
 # ---------------------------------------------------------------------------
+# Shared fan votes (FootballHub community board)
+# ---------------------------------------------------------------------------
+
+VOTES_FILE = os.environ.get(
+    "VOTES_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "votes.json"),
+)
+VALID_VOTE_SIDES = {"home", "away", "draw"}
+
+
+class VoteStore:
+    """Persists one vote per user per fixture; keeps a recent-activity feed."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._guard = threading.Lock()
+        self._data: dict = {"fixtures": {}}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict) and "fixtures" in loaded:
+                self._data = loaded
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"[votes] load failed: {exc}", flush=True)
+
+    def _save(self) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self._data, fh)
+        os.replace(tmp, self.path)
+
+    @staticmethod
+    def _fixture_key(fixture_id: int) -> str:
+        return str(fixture_id)
+
+    def cast(self, fixture_id: int, user_id: str, nickname: str, side: str) -> dict:
+        if side not in VALID_VOTE_SIDES:
+            raise ValueError("invalid side")
+        if not user_id or len(user_id) > 64:
+            raise ValueError("invalid user id")
+        nickname = (nickname or "Fan")[:32]
+
+        key = self._fixture_key(fixture_id)
+        with self._guard:
+            fixtures = self._data.setdefault("fixtures", {})
+            bucket = fixtures.setdefault(key, {"votes": {}, "recent": []})
+            votes: dict = bucket["votes"]
+            recent: list = bucket["recent"]
+
+            previous = votes.get(user_id)
+            if previous == side:
+                return self._snapshot(fixture_id, user_id)
+
+            votes[user_id] = side
+            recent = [r for r in recent if r.get("user_id") != user_id]
+            recent.insert(0, {
+                "user_id": user_id,
+                "nickname": nickname,
+                "side": side,
+                "voted_at": time.time(),
+            })
+            bucket["recent"] = recent[:100]
+            self._save()
+            return self._snapshot(fixture_id, user_id)
+
+    def snapshot(self, fixture_id: int, user_id: str | None = None) -> dict:
+        with self._guard:
+            return self._snapshot(fixture_id, user_id)
+
+    def _snapshot(self, fixture_id: int, user_id: str | None = None) -> dict:
+        key = self._fixture_key(fixture_id)
+        bucket = self._data.get("fixtures", {}).get(key, {"votes": {}, "recent": []})
+        votes: dict = bucket.get("votes", {})
+        tally = {"home": 0, "away": 0, "draw": 0}
+        for side in votes.values():
+            if side in tally:
+                tally[side] += 1
+
+        recent = []
+        for row in bucket.get("recent", []):
+            recent.append({
+                "user_id": row.get("user_id", ""),
+                "nickname": row.get("nickname", "Fan"),
+                "side": row.get("side", "home"),
+                "voted_at": row.get("voted_at", 0),
+                "is_you": bool(user_id and row.get("user_id") == user_id),
+            })
+
+        your_side = votes.get(user_id) if user_id else None
+        return {
+            "fixture_id": fixture_id,
+            "tally": tally,
+            "total": sum(tally.values()),
+            "recent": recent,
+            "your_side": your_side,
+        }
+
+
+VOTES = VoteStore(VOTES_FILE)
+
+
+# ---------------------------------------------------------------------------
 # Upstream fetch
 # ---------------------------------------------------------------------------
 
@@ -277,6 +384,54 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self.headers.get("x-fh-token", "") == APP_TOKEN
 
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        parsed = json.loads(raw.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _handle_votes_get(self, query: str) -> None:
+        params = dict(urllib.parse.parse_qsl(query))
+        fixture_raw = params.get("fixture", "")
+        try:
+            fixture_id = int(fixture_raw)
+        except ValueError:
+            self._send_json(400, {"error": "fixture query param required"})
+            return
+        user_id = self.headers.get("x-fh-user-id", "")
+        payload = VOTES.snapshot(fixture_id, user_id or None)
+        self._send_json(200, payload)
+
+    def _handle_votes_post(self) -> None:
+        try:
+            body = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": "invalid json"})
+            return
+
+        try:
+            fixture_id = int(body.get("fixture_id"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "fixture_id required"})
+            return
+
+        side = str(body.get("side", "")).lower()
+        nickname = str(body.get("nickname", "Fan"))
+        user_id = self.headers.get("x-fh-user-id", "")
+        if not user_id:
+            self._send_json(400, {"error": "x-fh-user-id header required"})
+            return
+
+        try:
+            payload = VOTES.cast(fixture_id, user_id, nickname, side)
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+
+        self._send_json(200, payload)
+
     def do_GET(self):  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
@@ -300,8 +455,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "":
             self._send_json(200, {
                 "name": "FootballHub API",
-                "endpoints": ["/health", "/_stats", "/<api-football path>"],
+                "endpoints": ["/health", "/_stats", "/fh/votes", "/<api-football path>"],
             })
+            return
+
+        if path == "/fh/votes":
+            if not self._authorized():
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            self._handle_votes_get(query)
             return
 
         if not self._authorized():
@@ -328,6 +490,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(exc.code, {"error": f"upstream {exc.code}"})
         except Exception as exc:  # noqa: BLE001
             self._send_json(502, {"error": "upstream unavailable", "detail": str(exc)})
+
+    def do_POST(self):  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
+
+        if path == "/fh/votes":
+            if not self._authorized():
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            self._handle_votes_post()
+            return
+
+        self._send_json(404, {"error": "not found"})
 
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args), flush=True)
