@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 WORKDIR /app
-COPY app.py .
+COPY app.py football_data_provider.py .
 
 ENV PORT=8080
 EXPOSE 8080

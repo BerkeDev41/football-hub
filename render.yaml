@@ -10,7 +10,11 @@ services:
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: DATA_SOURCE
+        value: hybrid
       - key: API_SPORTS_KEY
-        sync: false   # set in dashboard (your api-football key)
+        sync: false   # set in dashboard (your api-football key — fallback + Süper Lig)
+      - key: FOOTBALL_DATA_KEY
+        sync: false   # set in dashboard (free token from football-data.org)
       - key: APP_TOKEN
         sync: false   # set in dashboard (your shared app token)

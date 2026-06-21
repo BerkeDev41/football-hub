@@ -52,6 +52,42 @@ Run the offline test (no internet needed):
 python3 smoke_test.py
 ```
 
+## Data sources (football-data.org trial)
+
+The server supports three modes via the `DATA_SOURCE` environment variable:
+
+| Mode | Behaviour |
+|------|-----------|
+| `hybrid` **(recommended trial)** | football-data.org for top leagues (PL, La Liga, Serie A, Bundesliga, Ligue 1, CL…). api-football for everything else — **Süper Lig, World Cup, players, lineups, team pages**. |
+| `football-data` | football-data only. **Süper Lig will be empty** on the free tier. |
+| `api-football` | Original behaviour — revert anytime by setting this. |
+
+### What you keep / lose on football-data free tier
+
+**Works (via football-data):** fixtures, standings, top scorers for the 12 free competitions.
+
+**Still from api-football (hybrid):** Süper Lig, Galatasaray team hub, player profiles, transfers, lineups, live events, match statistics, player ratings.
+
+**Match detail on football-data fixtures:** basic score + teams only — no lineups/events on the free tier (the app shows "unavailable" instead of crashing).
+
+### Revert to api-football only
+
+In the Render dashboard → your service → **Environment** → set:
+```
+DATA_SOURCE=api-football
+```
+Save → auto-redeploys. Done. No app update needed.
+
+### football-data.org setup (free)
+
+1. Register at [football-data.org/client/register](https://www.football-data.org/client/register) (instant free token).
+2. In Render → **Environment** → add `FOOTBALL_DATA_KEY` = your token.
+3. Set `DATA_SOURCE=hybrid` (already the default in `render.yaml`).
+4. Keep `API_SPORTS_KEY` — still needed for Süper Lig and match detail.
+
+Response header `X-FH-Provider` shows which source served each request:
+`football-data`, `hybrid`, or `api-football`.
+
 ## Deploy to Render — 100% from the browser (no terminal)
 
 A `render.yaml` is included, so Render configures everything automatically.
